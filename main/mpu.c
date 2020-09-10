@@ -1,15 +1,22 @@
 #include "mpu.h"
 
-#include "stdint.h"
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/i2c.h"
 
 /**
- * Based on InvenSense Embedded Motion Drivers 5.1.3
+ * Ported from InvenSense Embedded Motion Drivers 5.1.3
+ * 
+ * Source (needs registration): https://invensense.tdk.com/developers/software-downloads/
+ * 
+ * See inv_mpu and inv_mpu_dmp_motion_driver in core/driver/eMPL
+ * 
+ * https://invensense.tdk.com/wp-content/uploads/2015/02/MPU-6000-Datasheet1.pdf
+ * https://invensense.tdk.com/wp-content/uploads/2015/02/MPU-6000-Register-Map1.pdf
  */
 
-#define DMP_SAMPLE_RATE (200)
-#define DMP_CODE_SIZE (3062)
-
-static const uint8_t dmpMemory[DMP_CODE_SIZE] = {
+static const uint8_t dmpFirmware[] = {
     /* bank # 0 */
     0x00, 0x00, 0x70, 0x00, 0x00, 0x00, 0x00, 0x24, 0x00, 0x00, 0x00, 0x02, 0x00, 0x03, 0x00, 0x00,
     0x00, 0x65, 0x00, 0x54, 0xff, 0xef, 0x00, 0x00, 0xfa, 0x80, 0x00, 0x0b, 0x12, 0x82, 0x00, 0x01,
@@ -215,10 +222,222 @@ static const uint8_t dmpMemory[DMP_CODE_SIZE] = {
     0xac, 0xde, 0x80, 0x92, 0xa2, 0xf2, 0x4c, 0x82, 0xa8, 0xf1, 0xca, 0xf2, 0x35, 0xf1, 0x96, 0x88,
     0xa6, 0xd9, 0x00, 0xd8, 0xf1, 0xff};
 
-static const uint16_t dmpMemoryStartAddr = 0x0400;
+static size_t mpuDmpPacketLen = 0;
 
-static void mpuWriteDmpMemory() {}
+static void mpuWriteRegister(uint8_t reg, uint8_t *data, size_t len)
+{
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
 
-static void mpuReadDmpMemory() {}
+    i2c_master_start(cmd);
 
-void mpuInit() {}
+    // Slave address (write bit)
+    i2c_master_write_byte(cmd, MPU_I2C_ADDR << 1 | I2C_MASTER_WRITE, true);
+    // Register address
+    i2c_master_write_byte(cmd, reg, true);
+
+    // Write data
+    i2c_master_write(cmd, data, len, true);
+
+    i2c_master_stop(cmd);
+
+    ESP_ERROR_CHECK(i2c_master_cmd_begin(MPU_I2C_PORT_NUM, cmd, portMAX_DELAY));
+    i2c_cmd_link_delete(cmd);
+}
+
+static void mpuReadRegister(uint8_t reg, uint8_t *data, size_t len)
+{
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+
+    i2c_master_start(cmd);
+
+    // Slave address (write bit)
+    i2c_master_write_byte(cmd, MPU_I2C_ADDR << 1 | I2C_MASTER_WRITE, true);
+    // Register address
+    i2c_master_write_byte(cmd, reg, true);
+
+    i2c_master_start(cmd);
+
+    // Slave address (read bit)
+    i2c_master_write_byte(cmd, MPU_I2C_ADDR << 1 | I2C_MASTER_READ, true);
+
+    // Read data
+    i2c_master_read(cmd, data, len, I2C_MASTER_LAST_NACK);
+
+    i2c_master_stop(cmd);
+
+    ESP_ERROR_CHECK(i2c_master_cmd_begin(MPU_I2C_PORT_NUM, cmd, portMAX_DELAY));
+    i2c_cmd_link_delete(cmd);
+}
+
+static void mpuDmpWriteMemory(uint16_t addr, uint8_t *data, size_t len)
+{
+    uint8_t writeAddr[] = {
+        (uint8_t)(addr >> 8),
+        (uint8_t)(addr & 0xFF),
+    };
+
+    mpuWriteRegister(MPU_REG_BANK_SEL, writeAddr, sizeof(writeAddr));
+    mpuWriteRegister(MPU_REG_MEM_RW, data, len);
+}
+
+static void mpuDmpReadMemory(uint16_t addr, uint8_t *data, size_t len)
+{
+    uint8_t writeAddr[] = {
+        (uint8_t)(addr >> 8),
+        (uint8_t)(addr & 0xFF),
+    };
+
+    mpuWriteRegister(MPU_REG_BANK_SEL, writeAddr, sizeof(writeAddr));
+    mpuReadRegister(MPU_REG_MEM_RW, data, len);
+}
+
+static void mpuDmpLoadFirmware(void)
+{
+    size_t writeSize = 0;
+    uint16_t addr = 0;
+
+    for (addr; addr < sizeof(dmpFirmware); addr += writeSize)
+    {
+        writeSize = (16 < sizeof(dmpFirmware) - addr) ? 16 : sizeof(dmpFirmware) - addr;
+        mpuDmpWriteMemory(addr, &dmpFirmware[addr], writeSize);
+    }
+
+    uint8_t startAddr[] = {
+        (uint8_t)(MPU_DMP_MEM_START_ADDR >> 8),
+        (uint8_t)(MPU_DMP_MEM_START_ADDR & 0xFF),
+    };
+    mpuWriteRegister(MPU_REG_PRGM_START_H, startAddr, sizeof(startAddr));
+}
+
+static void mpuDmpConfigure(void)
+{
+    uint8_t data[10];
+
+    // TODO set DMP orientation matrix
+
+    // Set integration scale factor
+    data[0] = (uint8_t)((MPU_GYRO_SF >> 24) & 0xFF);
+    data[1] = (uint8_t)((MPU_GYRO_SF >> 16) & 0xFF);
+    data[2] = (uint8_t)((MPU_GYRO_SF >> 8) & 0xFF);
+    data[3] = (uint8_t)(MPU_GYRO_SF & 0xFF);
+    mpuDmpWriteMemory(MPU_DMP_D_0_104, data, 4);
+
+    // Enable accel and gyro FIFO data
+    memset(data, 0xA3, 10);
+    data[1] = 0xC0;
+    data[2] = 0xC8;
+    data[3] = 0xC2;
+    data[4] = 0xC4;
+    data[5] = 0xCC;
+    data[6] = 0xC6;
+    mpuDmpWriteMemory(MPU_DMP_CFG_15, data, 10);
+    mpuDmpPacketLen += 12;
+
+    // Disable gesture FIFO data
+    data[0] = 0xD8;
+    mpuDmpWriteMemory(MPU_DMP_CFG_27, data, 1);
+
+    // Enable gyro automatic calibration feature
+    data[0] = 0xB8;
+    data[1] = 0xAA;
+    data[2] = 0xB3;
+    data[3] = 0x8D;
+    data[4] = 0xB4;
+    data[5] = 0x98;
+    data[6] = 0x0D;
+    data[7] = 0x35;
+    data[8] = 0x5D;
+    mpuDmpWriteMemory(MPU_DMP_CFG_MOTION_BIAS, data, 9);
+
+    // Enable calibrated gyro data feature
+    data[0] = 0xB2;
+    data[1] = 0x8B;
+    data[2] = 0xB6;
+    data[3] = 0x9B;
+    mpuDmpWriteMemory(MPU_DMP_CFG_GYRO_RAW_DATA, data, 4);
+
+    // Disable tap gesture feature
+    data[0] = 0xD8;
+    mpuDmpWriteMemory(MPU_DMP_CFG_20, data, 1);
+
+    // Disable Android orientation feature
+    data[0] = 0xD8;
+    mpuDmpWriteMemory(MPU_DMP_CFG_ANDROID_ORIENT_INT, data, 1);
+
+    // Disable 3-axis quaternion generation
+    memset(data, 0x8B, 4);
+    mpuDmpWriteMemory(MPU_DMP_CFG_LP_QUAT, data, 4);
+
+    // Enable 6-axis quaternion generation
+    data[0] = 0x20;
+    data[1] = 0x28;
+    data[2] = 0x30;
+    data[3] = 0x38;
+    mpuDmpWriteMemory(MPU_DMP_CFG_8, data, 4);
+    mpuDmpPacketLen += 16;
+
+    // Set FIFO update rate
+    uint16_t div = MPU_SAMPLE_RATE / MPU_DMP_FIFO_RATE - 1;
+    data[0] = (uint8_t)((div >> 8) & 0xFF);
+    data[1] = (uint8_t)(div & 0xFF);
+    mpuDmpWriteMemory(MPU_DMP_D_0_22, data, 2);
+    data[0] = 0xFE;
+    data[1] = 0xF2;
+    data[2] = 0xAB;
+    data[3] = 0xC4;
+    data[4] = 0xAA;
+    data[5] = 0xF1;
+    data[6] = 0xDF;
+    data[7] = 0xDF;
+    data[8] = 0xBB;
+    data[9] = 0xAF;
+    data[10] = 0xDF;
+    data[11] = 0xDF;
+    mpuDmpWriteMemory(MPU_DMP_CFG_6, data, 12);
+}
+
+static void mpuDmpReset(void)
+{
+    uint8_t data = 0;
+
+    // Disable everything
+    mpuWriteRegister(MPU_REG_INT_ENABLE, data, 1);
+    mpuWriteRegister(MPU_REG_FIFO_EN, data, 1);
+    mpuWriteRegister(MPU_REG_USER_CTRL, data, 1);
+
+    // Reset FIFO and DMP
+    data = MPU_BIT_USER_CTRL_FIFO_RST | MPU_BIT_USER_CTRL_DMP_RST;
+    mpuWriteRegister(MPU_REG_USER_CTRL, data, 1);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Enable FIFO and DMP
+    data = MPU_BIT_USER_CTRL_FIFO_EN | MPU_BIT_USER_CTRL_DMP_EN;
+    mpuWriteRegister(MPU_REG_USER_CTRL, data, 1);
+}
+
+void mpuInit(void)
+{
+    i2c_config_t config = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = GPIO_NUM_21,
+        .sda_pullup_en = GPIO_PULLUP_DISABLE,
+        .scl_io_num = GPIO_NUM_22,
+        .scl_pullup_en = GPIO_PULLUP_DISABLE,
+        .master.clk_speed = 100000,
+    };
+    ESP_ERROR_CHECK(i2c_param_config(MPU_I2C_PORT_NUM, &config));
+    ESP_ERROR_CHECK(i2c_driver_install(MPU_I2C_PORT_NUM, config.mode, 0, 0, 0));
+
+    mpuWriteRegister(MPU_REG_PWR_MGMT_1, (uint8_t[]){0x80}, 1); // Reset MPU
+    vTaskDelay(pdMS_TO_TICKS(100));
+    mpuWriteRegister(MPU_REG_PWR_MGMT_1, (uint8_t[]){0}, 1); // Wake up MPU
+
+    mpuWriteRegister(MPU_REG_GYRO_CONFIG, (uint8_t[]){3 << 3}, 1);                      // Gyro full scale range 2000°/s
+    mpuWriteRegister(MPU_REG_ACCEL_CONFIG, (uint8_t[]){3 << 3}, 1);                     // Accel full scale range 16g
+    mpuWriteRegister(MPU_REG_SMPLRT_DIV, (uint8_t[]){(1000 / MPU_SAMPLE_RATE - 1)}, 1); // Sample rate 200Hz (fixed when using DMP)
+    mpuWriteRegister(MPU_REG_CONFIG, (uint8_t[]){2}, 1);                                // Low pass filter 98Hz
+
+    mpuDmpLoadFirmware();
+    mpuDmpConfigure();
+    mpuDmpReset();
+}
