@@ -1,5 +1,5 @@
 /**
- * Ported from InvenSense Embedded Motion Drivers 5.1.3
+ * Ported from InvenSense Embedded Motion Drivers (eMD) version 5.1.3
  * 
  * Source (needs registration): https://invensense.tdk.com/developers/software-downloads/
  * 
@@ -12,6 +12,7 @@
 #include "mpu.h"
 
 #include <string.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
@@ -346,38 +347,38 @@ static void mpuDmpConfigure(void)
     data[0] = 0xD8;
     mpuDmpWriteMemory(MPU_DMP_CFG_27, data, 1);
 
-    // Enable gyro automatic calibration feature
-    data[0] = 0xB8;
-    data[1] = 0xAA;
-    data[2] = 0xB3;
-    data[3] = 0x8D;
-    data[4] = 0xB4;
-    data[5] = 0x98;
-    data[6] = 0x0D;
-    data[7] = 0x35;
-    data[8] = 0x5D;
-    mpuDmpWriteMemory(MPU_DMP_CFG_MOTION_BIAS, data, 9);
+    // Enable gyro automatic calibration feature (already enabled in firmware)
+    // data[0] = 0xB8;
+    // data[1] = 0xAA;
+    // data[2] = 0xB3;
+    // data[3] = 0x8D;
+    // data[4] = 0xB4;
+    // data[5] = 0x98;
+    // data[6] = 0x0D;
+    // data[7] = 0x35;
+    // data[8] = 0x5D;
+    // mpuDmpWriteMemory(MPU_DMP_CFG_MOTION_BIAS, data, 9);
 
-    // Enable calibrated gyro data feature
-    data[0] = 0xB2;
-    data[1] = 0x8B;
-    data[2] = 0xB6;
-    data[3] = 0x9B;
-    mpuDmpWriteMemory(MPU_DMP_CFG_GYRO_RAW_DATA, data, 4);
+    // Enable calibrated gyro data feature (already enabled in firmware)
+    // data[0] = 0xB2;
+    // data[1] = 0x8B;
+    // data[2] = 0xB6;
+    // data[3] = 0x9B;
+    // mpuDmpWriteMemory(MPU_DMP_CFG_GYRO_RAW_DATA, data, 4);
 
-    // Disable tap gesture feature
-    data[0] = 0xD8;
-    mpuDmpWriteMemory(MPU_DMP_CFG_20, data, 1);
+    // Disable tap gesture feature (already disabled in firmware)
+    // data[0] = 0xD8;
+    // mpuDmpWriteMemory(MPU_DMP_CFG_20, data, 1);
 
-    // Disable Android orientation feature
-    data[0] = 0xD8;
-    mpuDmpWriteMemory(MPU_DMP_CFG_ANDROID_ORIENT_INT, data, 1);
+    // Disable Android orientation feature (already disabled in firmware)
+    // data[0] = 0xD8;
+    // mpuDmpWriteMemory(MPU_DMP_CFG_ANDROID_ORIENT_INT, data, 1);
 
-    // Disable 3-axis quaternion generation
-    memset(data, 0x8B, 4);
-    mpuDmpWriteMemory(MPU_DMP_CFG_LP_QUAT, data, 4);
+    // Disable 3-axis (gyro only) quaternion generation (already disabled in firmware)
+    // memset(data, 0x8B, 4);
+    // mpuDmpWriteMemory(MPU_DMP_CFG_LP_QUAT, data, 4);
 
-    // Enable 6-axis quaternion generation
+    // Enable 6-axis (gyro + accel) quaternion generation
     data[0] = 0x20;
     data[1] = 0x28;
     data[2] = 0x30;
@@ -424,14 +425,14 @@ static void mpuDmpReset(void)
     mpuWriteRegister(MPU_REG_USER_CTRL, &data, 1);
 }
 
-static void mpuDmpReadPacket(uint8_t *data, size_t len)
+static esp_err_t mpuDmpReadPacket(uint8_t *data, size_t len)
 {
     uint8_t tmp[2];
 
     mpuReadRegister(MPU_REG_FIFO_COUNT_H, tmp, 2);
     uint16_t fifoCount = tmp[0] << 8 | tmp[1];
     if (fifoCount < dmpPacketLen)
-        return;
+        return ESP_FAIL;
 
     // ESP_LOGW(TAG, "packet count %d", fifoCount / len - 1);
 
@@ -440,9 +441,12 @@ static void mpuDmpReadPacket(uint8_t *data, size_t len)
     {
         ESP_LOGW(TAG, "detected FIFO overflow");
         mpuDmpReset();
+        return ESP_FAIL;
     }
 
     mpuReadRegister(MPU_REG_FIFO_RW, data, len);
+
+    return ESP_OK;
 }
 
 void mpuInit(void)
@@ -455,7 +459,7 @@ void mpuInit(void)
         .sda_pullup_en = GPIO_PULLUP_DISABLE,
         .scl_io_num = GPIO_NUM_22,
         .scl_pullup_en = GPIO_PULLUP_DISABLE,
-        .master.clk_speed = 100000,
+        .master.clk_speed = 400000,
     };
     ESP_ERROR_CHECK(i2c_param_config(MPU_I2C_PORT_NUM, &config));
     ESP_ERROR_CHECK(i2c_driver_install(MPU_I2C_PORT_NUM, config.mode, 0, 0, 0));
@@ -467,8 +471,8 @@ void mpuInit(void)
     mpuWriteRegister(MPU_REG_PWR_MGMT_1, &data, 1); // Wake up MPU
 
     data = 3 << 3;
-    mpuWriteRegister(MPU_REG_GYRO_CONFIG, &data, 1);  // Gyro full scale range 2000°/s
-    mpuWriteRegister(MPU_REG_ACCEL_CONFIG, &data, 1); // Accel full scale range 16g
+    mpuWriteRegister(MPU_REG_GYRO_CONFIG, &data, 1); // Gyro full scale range 2000°/s
+    // mpuWriteRegister(MPU_REG_ACCEL_CONFIG, &data, 1); // Accel full scale range 16g
     data = 1000 / MPU_SAMPLE_RATE - 1;
     mpuWriteRegister(MPU_REG_SMPLRT_DIV, &data, 1); // Sample rate
     data = 2;
@@ -485,34 +489,74 @@ void mpuDmpTest(void)
 {
     uint8_t *data = malloc(dmpPacketLen);
 
-    mpuDmpReadPacket(data, dmpPacketLen);
-    // ESP_LOG_BUFFER_HEXDUMP(TAG, data, dmpPacketLen, ESP_LOG_INFO);
+    if (mpuDmpReadPacket(data, dmpPacketLen) == ESP_OK)
+    {
+        // ESP_LOG_BUFFER_HEXDUMP(TAG, data, dmpPacketLen, ESP_LOG_INFO);
 
-    int32_t quat[4];
-    quat[0] = ((int32_t)data[0] << 24) | ((int32_t)data[1] << 16) |
-              ((int32_t)data[2] << 8) | data[3];
-    quat[1] = ((int32_t)data[4] << 24) | ((int32_t)data[5] << 16) |
-              ((int32_t)data[6] << 8) | data[7];
-    quat[2] = ((int32_t)data[8] << 24) | ((int32_t)data[9] << 16) |
-              ((int32_t)data[10] << 8) | data[11];
-    quat[3] = ((int32_t)data[12] << 24) | ((int32_t)data[13] << 16) |
-              ((int32_t)data[14] << 8) | data[15];
+        int32_t quat[4];
+        quat[0] = ((int32_t)data[0] << 24) | ((int32_t)data[1] << 16) |
+                  ((int32_t)data[2] << 8) | data[3];
+        quat[1] = ((int32_t)data[4] << 24) | ((int32_t)data[5] << 16) |
+                  ((int32_t)data[6] << 8) | data[7];
+        quat[2] = ((int32_t)data[8] << 24) | ((int32_t)data[9] << 16) |
+                  ((int32_t)data[10] << 8) | data[11];
+        quat[3] = ((int32_t)data[12] << 24) | ((int32_t)data[13] << 16) |
+                  ((int32_t)data[14] << 8) | data[15];
+        // ESP_LOGI(TAG, "quaternion %d %d %d %d", quat[0], quat[1], quat[2], quat[3]);
 
-    ESP_LOGI(TAG, "quaternion %d %d %d %d", quat[0], quat[1], quat[2], quat[3]);
+        // int16_t accel[3];
+        // accel[0] = ((int16_t)data[16 + 0] << 8) | data[16 + 1];
+        // accel[1] = ((int16_t)data[16 + 2] << 8) | data[16 + 3];
+        // accel[2] = ((int16_t)data[16 + 4] << 8) | data[16 + 5];
+        // ESP_LOGI(TAG, "accel %d %d %d", accel[0], accel[1], accel[2]);
 
-    int16_t accel[3];
-    accel[0] = ((int16_t)data[16 + 0] << 8) | data[16 + 1];
-    accel[1] = ((int16_t)data[16 + 2] << 8) | data[16 + 3];
-    accel[2] = ((int16_t)data[16 + 4] << 8) | data[16 + 5];
+        // int16_t gyro[3];
+        // gyro[0] = ((int16_t)data[22 + 0] << 8) | data[22 + 1];
+        // gyro[1] = ((int16_t)data[22 + 2] << 8) | data[22 + 3];
+        // gyro[2] = ((int16_t)data[22 + 4] << 8) | data[22 + 5];
+        // ESP_LOGI(TAG, "gyro %d %d %d", gyro[0], gyro[1], gyro[2]);
 
-    ESP_LOGI(TAG, "accel %d %d %d", accel[0], accel[1], accel[2]);
+        // Check for data corruption
+#define QUAT_ERROR_THRESH (1L << 24)
+#define QUAT_MAG_SQ_NORMALIZED (1L << 28)
+#define QUAT_MAG_SQ_MIN (QUAT_MAG_SQ_NORMALIZED - QUAT_ERROR_THRESH)
+#define QUAT_MAG_SQ_MAX (QUAT_MAG_SQ_NORMALIZED + QUAT_ERROR_THRESH)
+        int32_t quat_q14[4], quat_mag_sq;
+        quat_q14[0] = quat[0] >> 16;
+        quat_q14[1] = quat[1] >> 16;
+        quat_q14[2] = quat[2] >> 16;
+        quat_q14[3] = quat[3] >> 16;
+        quat_mag_sq = quat_q14[0] * quat_q14[0] + quat_q14[1] * quat_q14[1] +
+                      quat_q14[2] * quat_q14[2] + quat_q14[3] * quat_q14[3];
+        if ((quat_mag_sq < QUAT_MAG_SQ_MIN) || (quat_mag_sq > QUAT_MAG_SQ_MAX))
+        {
+            /* Quaternion is outside of the acceptable threshold. */
+            ESP_LOGW(TAG, "quaternion data is corrupted");
+        }
 
-    int16_t gyro[3];
-    gyro[0] = ((int16_t)data[22 + 0] << 8) | data[22 + 1];
-    gyro[1] = ((int16_t)data[22 + 2] << 8) | data[22 + 3];
-    gyro[2] = ((int16_t)data[22 + 4] << 8) | data[22 + 5];
+#define RAD2DEG(x) ((x)*180.0F / M_PI)
 
-    ESP_LOGI(TAG, "gyro %d %d %d", gyro[0], gyro[1], gyro[2]);
+        float qw = quat[0] / MPU_QUAT_SENS;
+        float qx = quat[1] / MPU_QUAT_SENS;
+        float qy = quat[2] / MPU_QUAT_SENS;
+        float qz = quat[3] / MPU_QUAT_SENS;
+
+        // Roll
+        float sinr_cosp = 2.0F * (qw * qx + qy * qz);
+        float cosr_cosp = 1.0F - 2.0F * (qx * qx + qy * qy);
+        float roll = atan2f(sinr_cosp, cosr_cosp);
+
+        // Pitch
+        float sinp = 2.0F * (qw * qy - qz * qx);
+        float pitch = asinf(sinp);
+
+        // Yaw
+        float siny_cosp = 2.0F * (qw * qz + qx * qy);
+        float cosy_cosp = 1.0F - 2.0F * (qy * qy + qz * qz);
+        float yaw = atan2f(siny_cosp, cosy_cosp);
+
+        ESP_LOGI(TAG, "roll %7.2f pitch %7.2f yaw %7.2f", RAD2DEG(roll), RAD2DEG(pitch), RAD2DEG(yaw));
+    }
 
     free(data);
 }
