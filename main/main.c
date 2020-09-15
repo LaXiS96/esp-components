@@ -24,6 +24,8 @@ static void imuReadTask(void *arg)
         //          (int16_t)(values[8] << 8 | values[9]), (int16_t)(values[10] << 8 | values[11]), (int16_t)(values[12] << 8 | values[13]),
         //          (int16_t)(values[6] << 8 | values[7]));
 
+        mpuDmpTest();
+
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }

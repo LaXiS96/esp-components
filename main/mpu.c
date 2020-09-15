@@ -1,10 +1,3 @@
-#include "mpu.h"
-
-#include <string.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "driver/i2c.h"
-
 /**
  * Ported from InvenSense Embedded Motion Drivers 5.1.3
  * 
@@ -15,6 +8,16 @@
  * https://invensense.tdk.com/wp-content/uploads/2015/02/MPU-6000-Datasheet1.pdf
  * https://invensense.tdk.com/wp-content/uploads/2015/02/MPU-6000-Register-Map1.pdf
  */
+
+#include "mpu.h"
+
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_log.h"
+#include "driver/i2c.h"
+
+static const char *TAG = "MPU";
 
 static const uint8_t dmpFirmware[] = {
     /* bank # 0 */
@@ -222,7 +225,7 @@ static const uint8_t dmpFirmware[] = {
     0xac, 0xde, 0x80, 0x92, 0xa2, 0xf2, 0x4c, 0x82, 0xa8, 0xf1, 0xca, 0xf2, 0x35, 0xf1, 0x96, 0x88,
     0xa6, 0xd9, 0x00, 0xd8, 0xf1, 0xff};
 
-static size_t mpuDmpPacketLen = 0;
+static size_t dmpPacketLen = 0;
 
 static void mpuWriteRegister(uint8_t reg, uint8_t *data, size_t len)
 {
@@ -294,12 +297,20 @@ static void mpuDmpReadMemory(uint16_t addr, uint8_t *data, size_t len)
 static void mpuDmpLoadFirmware(void)
 {
     size_t writeSize = 0;
-    uint16_t addr = 0;
+    uint16_t addr;
 
-    for (addr; addr < sizeof(dmpFirmware); addr += writeSize)
+    for (addr = 0; addr < sizeof(dmpFirmware); addr += writeSize)
     {
-        writeSize = (16 < sizeof(dmpFirmware) - addr) ? 16 : sizeof(dmpFirmware) - addr;
-        mpuDmpWriteMemory(addr, &dmpFirmware[addr], writeSize);
+        writeSize = (MPU_DMP_CHUNK_SIZE < sizeof(dmpFirmware) - addr)
+                        ? MPU_DMP_CHUNK_SIZE
+                        : sizeof(dmpFirmware) - addr;
+        mpuDmpWriteMemory(addr, (uint8_t *)(dmpFirmware + addr), writeSize);
+
+        // Dump written data and compare
+        // uint8_t dmp[MPU_DMP_CHUNK_SIZE];
+        // mpuDmpReadMemory(addr, dmp, writeSize);
+        // if (memcmp(dmpFirmware + addr, dmp, writeSize) != 0)
+        //     ESP_LOGI(TAG, "memory dump does not match");
     }
 
     uint8_t startAddr[] = {
@@ -312,8 +323,6 @@ static void mpuDmpLoadFirmware(void)
 static void mpuDmpConfigure(void)
 {
     uint8_t data[10];
-
-    // TODO set DMP orientation matrix
 
     // Set integration scale factor
     data[0] = (uint8_t)((MPU_GYRO_SF >> 24) & 0xFF);
@@ -331,7 +340,7 @@ static void mpuDmpConfigure(void)
     data[5] = 0xCC;
     data[6] = 0xC6;
     mpuDmpWriteMemory(MPU_DMP_CFG_15, data, 10);
-    mpuDmpPacketLen += 12;
+    dmpPacketLen += 12;
 
     // Disable gesture FIFO data
     data[0] = 0xD8;
@@ -374,7 +383,7 @@ static void mpuDmpConfigure(void)
     data[2] = 0x30;
     data[3] = 0x38;
     mpuDmpWriteMemory(MPU_DMP_CFG_8, data, 4);
-    mpuDmpPacketLen += 16;
+    dmpPacketLen += 16;
 
     // Set FIFO update rate
     uint16_t div = MPU_SAMPLE_RATE / MPU_DMP_FIFO_RATE - 1;
@@ -401,22 +410,45 @@ static void mpuDmpReset(void)
     uint8_t data = 0;
 
     // Disable everything
-    mpuWriteRegister(MPU_REG_INT_ENABLE, data, 1);
-    mpuWriteRegister(MPU_REG_FIFO_EN, data, 1);
-    mpuWriteRegister(MPU_REG_USER_CTRL, data, 1);
+    mpuWriteRegister(MPU_REG_INT_ENABLE, &data, 1);
+    mpuWriteRegister(MPU_REG_FIFO_EN, &data, 1);
+    mpuWriteRegister(MPU_REG_USER_CTRL, &data, 1);
 
     // Reset FIFO and DMP
     data = MPU_BIT_USER_CTRL_FIFO_RST | MPU_BIT_USER_CTRL_DMP_RST;
-    mpuWriteRegister(MPU_REG_USER_CTRL, data, 1);
+    mpuWriteRegister(MPU_REG_USER_CTRL, &data, 1);
     vTaskDelay(pdMS_TO_TICKS(50));
 
     // Enable FIFO and DMP
     data = MPU_BIT_USER_CTRL_FIFO_EN | MPU_BIT_USER_CTRL_DMP_EN;
-    mpuWriteRegister(MPU_REG_USER_CTRL, data, 1);
+    mpuWriteRegister(MPU_REG_USER_CTRL, &data, 1);
+}
+
+static void mpuDmpReadPacket(uint8_t *data, size_t len)
+{
+    uint8_t tmp[2];
+
+    mpuReadRegister(MPU_REG_FIFO_COUNT_H, tmp, 2);
+    uint16_t fifoCount = tmp[0] << 8 | tmp[1];
+    if (fifoCount < dmpPacketLen)
+        return;
+
+    // ESP_LOGW(TAG, "packet count %d", fifoCount / len - 1);
+
+    mpuReadRegister(MPU_REG_INT_STATUS, tmp, 1);
+    if (tmp[0] & MPU_BIT_INT_STATUS_FIFO_OVERFLOW)
+    {
+        ESP_LOGW(TAG, "detected FIFO overflow");
+        mpuDmpReset();
+    }
+
+    mpuReadRegister(MPU_REG_FIFO_RW, data, len);
 }
 
 void mpuInit(void)
 {
+    uint8_t data = 0;
+
     i2c_config_t config = {
         .mode = I2C_MODE_MASTER,
         .sda_io_num = GPIO_NUM_21,
@@ -428,16 +460,59 @@ void mpuInit(void)
     ESP_ERROR_CHECK(i2c_param_config(MPU_I2C_PORT_NUM, &config));
     ESP_ERROR_CHECK(i2c_driver_install(MPU_I2C_PORT_NUM, config.mode, 0, 0, 0));
 
-    mpuWriteRegister(MPU_REG_PWR_MGMT_1, (uint8_t[]){0x80}, 1); // Reset MPU
+    data = 0x80;
+    mpuWriteRegister(MPU_REG_PWR_MGMT_1, &data, 1); // Reset MPU
     vTaskDelay(pdMS_TO_TICKS(100));
-    mpuWriteRegister(MPU_REG_PWR_MGMT_1, (uint8_t[]){0}, 1); // Wake up MPU
+    data = 0;
+    mpuWriteRegister(MPU_REG_PWR_MGMT_1, &data, 1); // Wake up MPU
 
-    mpuWriteRegister(MPU_REG_GYRO_CONFIG, (uint8_t[]){3 << 3}, 1);                      // Gyro full scale range 2000°/s
-    mpuWriteRegister(MPU_REG_ACCEL_CONFIG, (uint8_t[]){3 << 3}, 1);                     // Accel full scale range 16g
-    mpuWriteRegister(MPU_REG_SMPLRT_DIV, (uint8_t[]){(1000 / MPU_SAMPLE_RATE - 1)}, 1); // Sample rate 200Hz (fixed when using DMP)
-    mpuWriteRegister(MPU_REG_CONFIG, (uint8_t[]){2}, 1);                                // Low pass filter 98Hz
+    data = 3 << 3;
+    mpuWriteRegister(MPU_REG_GYRO_CONFIG, &data, 1);  // Gyro full scale range 2000°/s
+    mpuWriteRegister(MPU_REG_ACCEL_CONFIG, &data, 1); // Accel full scale range 16g
+    data = 1000 / MPU_SAMPLE_RATE - 1;
+    mpuWriteRegister(MPU_REG_SMPLRT_DIV, &data, 1); // Sample rate
+    data = 2;
+    mpuWriteRegister(MPU_REG_CONFIG, &data, 1); // Low pass filter 98Hz
 
     mpuDmpLoadFirmware();
     mpuDmpConfigure();
     mpuDmpReset();
+
+    ESP_LOGI(TAG, "initialization completed");
+}
+
+void mpuDmpTest(void)
+{
+    uint8_t *data = malloc(dmpPacketLen);
+
+    mpuDmpReadPacket(data, dmpPacketLen);
+    // ESP_LOG_BUFFER_HEXDUMP(TAG, data, dmpPacketLen, ESP_LOG_INFO);
+
+    int32_t quat[4];
+    quat[0] = ((int32_t)data[0] << 24) | ((int32_t)data[1] << 16) |
+              ((int32_t)data[2] << 8) | data[3];
+    quat[1] = ((int32_t)data[4] << 24) | ((int32_t)data[5] << 16) |
+              ((int32_t)data[6] << 8) | data[7];
+    quat[2] = ((int32_t)data[8] << 24) | ((int32_t)data[9] << 16) |
+              ((int32_t)data[10] << 8) | data[11];
+    quat[3] = ((int32_t)data[12] << 24) | ((int32_t)data[13] << 16) |
+              ((int32_t)data[14] << 8) | data[15];
+
+    ESP_LOGI(TAG, "quaternion %d %d %d %d", quat[0], quat[1], quat[2], quat[3]);
+
+    int16_t accel[3];
+    accel[0] = ((int16_t)data[16 + 0] << 8) | data[16 + 1];
+    accel[1] = ((int16_t)data[16 + 2] << 8) | data[16 + 3];
+    accel[2] = ((int16_t)data[16 + 4] << 8) | data[16 + 5];
+
+    ESP_LOGI(TAG, "accel %d %d %d", accel[0], accel[1], accel[2]);
+
+    int16_t gyro[3];
+    gyro[0] = ((int16_t)data[22 + 0] << 8) | data[22 + 1];
+    gyro[1] = ((int16_t)data[22 + 2] << 8) | data[22 + 3];
+    gyro[2] = ((int16_t)data[22 + 4] << 8) | data[22 + 5];
+
+    ESP_LOGI(TAG, "gyro %d %d %d", gyro[0], gyro[1], gyro[2]);
+
+    free(data);
 }

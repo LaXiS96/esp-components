@@ -2,8 +2,9 @@
 
 #define MPU_I2C_PORT_NUM I2C_NUM_0
 #define MPU_I2C_ADDR 0x68
-#define MPU_SAMPLE_RATE 200   // Fixed at 200Hz when using DMP
-#define MPU_DMP_FIFO_RATE 100 // Must be lower than MPU_SAMPLE_RATE
+#define MPU_SAMPLE_RATE 200 // Fixed at 200Hz when using DMP
+#define MPU_DMP_CHUNK_SIZE 16
+#define MPU_DMP_FIFO_RATE 8 // Must be lower than MPU_SAMPLE_RATE
 
 #define MPU_BANK_SIZE 256
 #define MPU_DMP_MEM_START_ADDR 0x0400
@@ -15,13 +16,17 @@
 #define MPU_REG_ACCEL_CONFIG 0x1C
 #define MPU_REG_FIFO_EN 0x23
 #define MPU_REG_INT_ENABLE 0x38
+#define MPU_REG_INT_STATUS 0x3A
 #define MPU_REG_USER_CTRL 0x6A
 #define MPU_REG_PWR_MGMT_1 0x6B
 #define MPU_REG_PWR_MGMT_2 0x6C
 #define MPU_REG_BANK_SEL 0x6D
 #define MPU_REG_MEM_RW 0x6F
 #define MPU_REG_PRGM_START_H 0x70
+#define MPU_REG_FIFO_COUNT_H 0x72
+#define MPU_REG_FIFO_RW 0x74
 
+#define MPU_BIT_INT_STATUS_FIFO_OVERFLOW 0x10
 #define MPU_BIT_USER_CTRL_FIFO_EN 0x40
 #define MPU_BIT_USER_CTRL_DMP_EN 0x80
 #define MPU_BIT_USER_CTRL_FIFO_RST 0x04
@@ -40,3 +45,4 @@
 #define MPU_DMP_CFG_6 2753
 
 void mpuInit(void);
+void mpuDmpTest(void);
