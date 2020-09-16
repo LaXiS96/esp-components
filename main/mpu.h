@@ -4,7 +4,7 @@
 #define MPU_I2C_ADDR 0x68
 #define MPU_SAMPLE_RATE 200 // Fixed at 200Hz when using DMP
 #define MPU_DMP_CHUNK_SIZE 16
-#define MPU_DMP_FIFO_RATE 8 // Must be lower than MPU_SAMPLE_RATE
+#define MPU_DMP_FIFO_RATE 9 // Must be lower than MPU_SAMPLE_RATE (also at least 1 lower than poll rate)
 
 #define MPU_BANK_SIZE 256
 #define MPU_DMP_MEM_START_ADDR 0x0400

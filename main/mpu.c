@@ -1,5 +1,6 @@
 /**
- * Ported from InvenSense Embedded Motion Drivers (eMD) version 5.1.3
+ * Ported from InvenSense Embedded Motion Drivers (eMD) versions 5.1.3 / 6.12
+ * (both versions use the same DMP firmware and low level API)
  * 
  * Source (needs registration): https://invensense.tdk.com/developers/software-downloads/
  * 
@@ -434,7 +435,7 @@ static esp_err_t mpuDmpReadPacket(uint8_t *data, size_t len)
     if (fifoCount < dmpPacketLen)
         return ESP_FAIL;
 
-    // ESP_LOGW(TAG, "packet count %d", fifoCount / len - 1);
+    // ESP_LOGW(TAG, "packet count %d", fifoCount / len);
 
     mpuReadRegister(MPU_REG_INT_STATUS, tmp, 1);
     if (tmp[0] & MPU_BIT_INT_STATUS_FIFO_OVERFLOW)
@@ -470,13 +471,21 @@ void mpuInit(void)
     data = 0;
     mpuWriteRegister(MPU_REG_PWR_MGMT_1, &data, 1); // Wake up MPU
 
+    // Gyro full scale range 2000°/s
     data = 3 << 3;
-    mpuWriteRegister(MPU_REG_GYRO_CONFIG, &data, 1); // Gyro full scale range 2000°/s
-    // mpuWriteRegister(MPU_REG_ACCEL_CONFIG, &data, 1); // Accel full scale range 16g
-    data = 1000 / MPU_SAMPLE_RATE - 1;
-    mpuWriteRegister(MPU_REG_SMPLRT_DIV, &data, 1); // Sample rate
-    data = 2;
-    mpuWriteRegister(MPU_REG_CONFIG, &data, 1); // Low pass filter 98Hz
+    mpuWriteRegister(MPU_REG_GYRO_CONFIG, &data, 1);
+
+    // Accel full scale range 16g (DMP seems to behave better at the default 2g range)
+    // data = 3 << 3;
+    // mpuWriteRegister(MPU_REG_ACCEL_CONFIG, &data, 1);
+
+    // Digital low pass filter 42Hz
+    data = 3;
+    mpuWriteRegister(MPU_REG_CONFIG, &data, 1);
+
+    // Sample rate
+    data = 1000 / MPU_SAMPLE_RATE - 1; // 8000 if DLPF disabled (DLPF_CFG = 0 or 7), 1000 otherwise
+    mpuWriteRegister(MPU_REG_SMPLRT_DIV, &data, 1);
 
     mpuDmpLoadFirmware();
     mpuDmpConfigure();
