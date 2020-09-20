@@ -2,37 +2,36 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 
-#include "mpu.h"
+#include "mpu6050.h"
+#include "ili9341.h"
 
-static void imuReadTask(void *arg)
+static void testTask(void *arg)
 {
     while (1)
     {
-        // uint8_t values[14];
+        // mpuDmpTest();
 
-        // imuRegRead(IMU_REG_ACCEL_XOUT_H, values, sizeof(values));
+        ili9341Test();
 
-        // // ESP_LOGI("IMU", "%.2X %.2X %.2X %.2X %.2X %.2X %.2X %.2X"
-        // //                 "%.2X %.2X %.2X %.2X %.2X %.2X",
-        // //          values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7],
-        // //          values[8], values[9], values[10], values[11], values[12], values[13]);
-
-        // ESP_LOGI("IMU", "aX=%5d aY=%5d aZ=%5d "
-        //                 "gX=%5d gY=%5d gZ=%5d "
-        //                 "T=%5d",
-        //          (int16_t)(values[0] << 8 | values[1]), (int16_t)(values[2] << 8 | values[3]), (int16_t)(values[4] << 8 | values[5]),
-        //          (int16_t)(values[8] << 8 | values[9]), (int16_t)(values[10] << 8 | values[11]), (int16_t)(values[12] << 8 | values[13]),
-        //          (int16_t)(values[6] << 8 | values[7]));
-
-        mpuDmpTest();
-
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
 void app_main(void)
 {
-    mpuInit();
+    ili9341Config_t displayConfig = {
+        .spiHost = SPI2_HOST,
+        .spiMisoIo = GPIO_NUM_12,
+        .spiMosiIo = GPIO_NUM_13,
+        .spiSclkIo = GPIO_NUM_14,
+        .spiCsIo = GPIO_NUM_15,
+        .spiDcIo = GPIO_NUM_2,
+        .spiResetIo = GPIO_NUM_4,
+        .spiClockHz = 1 * 1000 * 1000,
+    };
+    ili9341Init(&displayConfig);
 
-    xTaskCreate(imuReadTask, "IMU READ", 2048, NULL, 1, NULL);
+    // mpuInit();
+
+    xTaskCreate(testTask, "TEST", 2048, NULL, 1, NULL);
 }
